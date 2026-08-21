@@ -1,0 +1,16 @@
+from enum import Enum
+
+
+class CorrelationRuleType(str, Enum):
+
+    SAME_CLIENT = "SAME_CLIENT"
+
+    SAME_SERVER = "SAME_SERVER"
+
+    SAME_APPLICATION = "SAME_APPLICATION"
+
+    SAME_FINGERPRINT = "SAME_FINGERPRINT"
+
+    TIME_WINDOW = "TIME_WINDOW"
+
+    RELATED_MESSAGE = "RELATED_MESSAGE"

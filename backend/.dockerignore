@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env
+
+# Testing / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Local database / Fluent Bit state
+fluent-bit/*.db
+
+# Local logs
+logs/
+*.log
+
+# Dataset files
+datasets/
+
+# Temporary files
+*.tmp
+*.swp
+.DS_Store

@@ -1,0 +1,76 @@
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: investigation-postgres
+
+    environment:
+      POSTGRES_DB: investigation_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+
+    ports:
+      - "5433:5432"
+
+    volumes:
+      - investigation_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d investigation_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: investigation-api
+
+    env_file:
+      - .env
+
+    ports:
+      - "8000:8000"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+
+  fluent-bit:
+    image: fluent/fluent-bit:latest
+
+    container_name: investigation-fluent-bit
+
+    volumes:
+      - ./fluent-bit/fluent-bit-docker.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./fluent-bit/parsers-docker.conf:/fluent-bit/etc/parsers-docker.conf:ro
+      - ./fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+
+      # Docker container logs
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+
+      # Docker Engine access for container metrics
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+      # Lua script
+      - ./fluent-bit/status_to_level.lua:/fluent-bit/etc/status_to_level.lua:ro
+      - ./fluent-bit/container_stats.lua:/fluent-bit/etc/container_stats.lua:ro
+      # - /var/lib/docker/containers:/var/lib/docker/containers:ro
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    depends_on:
+      - api
+
+    restart: unless-stopped
+
+
+volumes:
+  investigation_postgres_data:

@@ -1,0 +1,18 @@
+from enum import Enum
+
+
+class ActionStatusEnum(str, Enum):
+
+    PENDING = "PENDING"
+
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+
+    APPROVED = "APPROVED"
+
+    REJECTED = "REJECTED"
+
+    PENDING_EXECUTION = "PENDING_EXECUTION"
+
+    EXECUTED = "EXECUTED"
+
+    FAILED = "FAILED"
