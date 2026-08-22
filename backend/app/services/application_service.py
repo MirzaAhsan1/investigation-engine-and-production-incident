@@ -29,7 +29,7 @@ def get_applications(
 ):
     return (
         db.query(Application)
-        .order_by(Application.name)
+        .order_by(Application.created_at.asc())
         .all()
     )
 

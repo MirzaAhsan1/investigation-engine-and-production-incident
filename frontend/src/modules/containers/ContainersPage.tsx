@@ -14,6 +14,7 @@ import {
   Radio,
 } from "lucide-react";
 import { useGetLogsQuery } from "../../api/logsApi";
+import { useGetApplicationsQuery } from "../../api/applicationsApi";
 import { Skeleton } from "../../components/ui/Skeleton";
 
 export interface ContainerInfo {
@@ -38,9 +39,24 @@ export interface LiveWsLogPayload {
 
 export default function ContainersPage() {
   const navigate = useNavigate();
-  const { data: logs, isLoading, isFetching, error, refetch } = useGetLogsQuery(undefined, {
+  
+  // 1. Stable source of containers (poll applications every 30s)
+  const { data: applications, isLoading: isAppsLoading, isFetching: isAppsFetching, error: appsError, refetch: refetchApps } = useGetApplicationsQuery(undefined, {
+    pollingInterval: 30000,
+  });
+
+  // 2. Transient log activity (poll logs every 5s)
+  const { data: logs, isLoading: isLogsLoading, isFetching: isLogsFetching, error: logsError, refetch: refetchLogs } = useGetLogsQuery(undefined, {
     pollingInterval: 5000,
   });
+
+  const isLoading = isAppsLoading || (isLogsLoading && !applications);
+  const isFetching = isAppsFetching || isLogsFetching;
+  const error = appsError || logsError;
+  const refetch = () => {
+    refetchApps();
+    refetchLogs();
+  };
 
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<"ALL" | "HEALTHY" | "WARNING" | "CRITICAL">("ALL");
@@ -48,6 +64,16 @@ export default function ContainersPage() {
   // WebSocket Live Streaming logs state for instant runtime discovery
   const [wsLogs, setWsLogs] = useState<LiveWsLogPayload[]>([]);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+
+  // Keep a persistent map of container statistics so that containers with no logs remain visible with their last known information
+  const [containerStatsMap, setContainerStatsMap] = useState<Record<string, {
+    totalLogs: number;
+    errorCount: number;
+    warnCount: number;
+    lastActive: string;
+    status: "HEALTHY" | "WARNING" | "CRITICAL";
+    host: string;
+  }>>({});
 
   useEffect(() => {
     let wsUrl = "";
@@ -92,36 +118,42 @@ export default function ContainersPage() {
     };
   }, []);
 
-  // Process stored DB logs + Live WebSocket logs into real-time active container objects
-  const containers = useMemo(() => {
-    const map = new Map<string, ContainerInfo>();
+  // Update persistent stats map when database logs query updates
+  useEffect(() => {
+    if (!logs || logs.length === 0) return;
 
-    // 1. Process stored DB logs
-    if (logs && logs.length > 0) {
+    setContainerStatsMap((prev) => {
+      const newMap = { ...prev };
+      const currentStats = new Map<string, {
+        totalLogs: number;
+        errorCount: number;
+        warnCount: number;
+        lastActive: string;
+        status: "HEALTHY" | "WARNING" | "CRITICAL";
+        host: string;
+      }>();
+
       logs.forEach((log) => {
         const containerName = log.container_name || log.application_name || "app-service";
-        const appName = log.application_name || "Unknown App";
         const hostName = log.host || log.server_name || "cluster-node";
 
-        const existing = map.get(containerName);
+        const existing = currentStats.get(containerName);
+        const isErr = log.level === "ERROR";
+        const isWarn = log.level === "WARN";
 
         if (!existing) {
-          const isErr = log.level === "ERROR";
-          const isWarn = log.level === "WARN";
-          map.set(containerName, {
-            name: containerName,
-            applicationName: appName,
-            host: hostName,
+          currentStats.set(containerName, {
             totalLogs: 1,
             errorCount: isErr ? 1 : 0,
             warnCount: isWarn ? 1 : 0,
             lastActive: log.timestamp,
             status: isErr ? "CRITICAL" : isWarn ? "WARNING" : "HEALTHY",
+            host: hostName,
           });
         } else {
           existing.totalLogs += 1;
-          if (log.level === "ERROR") existing.errorCount += 1;
-          if (log.level === "WARN") existing.warnCount += 1;
+          if (isErr) existing.errorCount += 1;
+          if (isWarn) existing.warnCount += 1;
 
           if (new Date(log.timestamp) > new Date(existing.lastActive)) {
             existing.lastActive = log.timestamp;
@@ -134,50 +166,75 @@ export default function ContainersPage() {
           }
         }
       });
-    }
 
-    // 2. Process real-time streaming WebSocket logs (non-DB)
-    wsLogs.forEach((wsLog) => {
-      const containerName = wsLog.container_name || wsLog.application_name || "app-service";
-      const appName = wsLog.application_name || "Unknown App";
-      const hostName = wsLog.host || "cluster-node";
-      const timestamp = wsLog.timestamp || new Date().toISOString();
-      const level = (wsLog.level || "INFO").toUpperCase();
+      currentStats.forEach((stats, containerName) => {
+        newMap[containerName] = stats;
+      });
 
-      const existing = map.get(containerName);
-
-      if (!existing) {
-        const isErr = level === "ERROR";
-        const isWarn = level === "WARN";
-        map.set(containerName, {
-          name: containerName,
-          applicationName: appName,
-          host: hostName,
-          totalLogs: 1,
-          errorCount: isErr ? 1 : 0,
-          warnCount: isWarn ? 1 : 0,
-          lastActive: timestamp,
-          status: isErr ? "CRITICAL" : isWarn ? "WARNING" : "HEALTHY",
-        });
-      } else {
-        existing.totalLogs += 1;
-        if (level === "ERROR") existing.errorCount += 1;
-        if (level === "WARN") existing.warnCount += 1;
-
-        if (new Date(timestamp) > new Date(existing.lastActive)) {
-          existing.lastActive = timestamp;
-        }
-
-        if (existing.errorCount > 0) {
-          existing.status = "CRITICAL";
-        } else if (existing.warnCount > 0 && existing.status !== "CRITICAL") {
-          existing.status = "WARNING";
-        }
-      }
+      return newMap;
     });
+  }, [logs]);
 
-    return Array.from(map.values()).sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
-  }, [logs, wsLogs]);
+  // Build cards stably based on application registry, attaching latest statistics and ws logs
+  const containers = useMemo(() => {
+    if (!applications) return [];
+
+    return applications.map((app) => {
+      const containerName = app.container_name;
+      const appName = app.name;
+
+      const dbStats = containerStatsMap[containerName] || {
+        totalLogs: 0,
+        errorCount: 0,
+        warnCount: 0,
+        lastActive: app.created_at || new Date().toISOString(),
+        status: "HEALTHY" as const,
+        host: "cluster-node",
+      };
+
+      const stats = { ...dbStats };
+
+      const appWsLogs = wsLogs.filter(
+        (wsLog) =>
+          (wsLog.container_name || wsLog.application_name || "app-service") === containerName
+      );
+
+      appWsLogs.forEach((wsLog) => {
+        stats.totalLogs += 1;
+        const level = (wsLog.level || "INFO").toUpperCase();
+        if (level === "ERROR") stats.errorCount += 1;
+        if (level === "WARN") stats.warnCount += 1;
+
+        const timestamp = wsLog.timestamp || new Date().toISOString();
+        if (new Date(timestamp) > new Date(stats.lastActive)) {
+          stats.lastActive = timestamp;
+        }
+
+        if (wsLog.host) {
+          stats.host = wsLog.host;
+        }
+      });
+
+      if (stats.errorCount > 0) {
+        stats.status = "CRITICAL";
+      } else if (stats.warnCount > 0) {
+        stats.status = "WARNING";
+      } else {
+        stats.status = "HEALTHY";
+      }
+
+      return {
+        name: containerName,
+        applicationName: appName,
+        host: stats.host,
+        totalLogs: stats.totalLogs,
+        errorCount: stats.errorCount,
+        warnCount: stats.warnCount,
+        lastActive: stats.lastActive,
+        status: stats.status,
+      };
+    });
+  }, [applications, containerStatsMap, wsLogs]);
 
   // Filtered containers list
   const filteredContainers = useMemo(() => {

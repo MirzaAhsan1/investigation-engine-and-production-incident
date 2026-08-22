@@ -10,6 +10,7 @@ import "../api/monitoringApi";
 import "../api/recommendationsApi";
 import "../api/analyticsApi";
 import "../api/actionsApi";
+import "../api/applicationsApi";
 
 
 export const store = configureStore({

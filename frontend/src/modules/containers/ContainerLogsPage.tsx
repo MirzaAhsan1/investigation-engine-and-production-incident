@@ -20,6 +20,7 @@ import {
   Play,
 } from "lucide-react";
 import { useGetLogsQuery, type LogItem } from "../../api/logsApi";
+import { useGetApplicationsQuery } from "../../api/applicationsApi";
 import { Skeleton } from "../../components/ui/Skeleton";
 
 export interface LiveWsLog {
@@ -53,6 +54,17 @@ export default function ContainerLogsPage() {
   const { containerName } = useParams<{ containerName: string }>();
   const decodedContainerName = containerName ? decodeURIComponent(containerName) : "";
 
+  // 1. Stable metadata check (applications)
+  const { data: applications } = useGetApplicationsQuery(undefined, {
+    pollingInterval: 30000,
+  });
+
+  const currentApp = useMemo(() => {
+    if (!applications) return null;
+    return applications.find((app) => app.container_name === decodedContainerName);
+  }, [applications, decodedContainerName]);
+
+  // 2. Poll DB logs for this container
   const { data: logs, isLoading, isFetching, error, refetch } = useGetLogsQuery(
     decodedContainerName ? { container_name: decodedContainerName } : undefined,
     { pollingInterval: 5000 }
@@ -68,6 +80,21 @@ export default function ContainerLogsPage() {
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const liveLogsEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Persistent stats to prevent metrics from resetting to 0 when DB logs are empty
+  const [lastKnownStats, setLastKnownStats] = useState<{
+    total: number;
+    errors: number;
+    warnings: number;
+    host: string;
+    status: "HEALTHY" | "WARNING" | "CRITICAL";
+  }>({
+    total: 0,
+    errors: 0,
+    warnings: 0,
+    host: "cluster-node",
+    status: "HEALTHY",
+  });
 
   useEffect(() => {
     let wsUrl = "";
@@ -130,6 +157,47 @@ export default function ContainerLogsPage() {
     };
   }, [isPaused, decodedContainerName]);
 
+  // Update persistent stats state
+  useEffect(() => {
+    if (!logs) return;
+
+    const containerLogs = logs.filter(
+      (l) =>
+        !decodedContainerName ||
+        l.container_name === decodedContainerName ||
+        (!l.container_name && l.application_name === decodedContainerName)
+    );
+
+    if (containerLogs.length > 0 || liveLogs.length > 0) {
+      const dbErrors = containerLogs.filter((l) => l.level === "ERROR").length;
+      const dbWarnings = containerLogs.filter((l) => l.level === "WARN").length;
+
+      const liveErrors = liveLogs.filter((l) => l.level === "ERROR").length;
+      const liveWarnings = liveLogs.filter((l) => l.level === "WARN").length;
+
+      const totalErrors = dbErrors + liveErrors;
+      const totalWarnings = dbWarnings + liveWarnings;
+      const totalEvents = containerLogs.length + liveLogs.length;
+
+      const host = containerLogs[0]?.host || containerLogs[0]?.server_name || liveLogs[0]?.host || "cluster-node";
+
+      let containerStatus: "HEALTHY" | "WARNING" | "CRITICAL" = "HEALTHY";
+      if (totalErrors > 0) {
+        containerStatus = "CRITICAL";
+      } else if (totalWarnings > 0) {
+        containerStatus = "WARNING";
+      }
+
+      setLastKnownStats({
+        total: totalEvents,
+        errors: totalErrors,
+        warnings: totalWarnings,
+        host,
+        status: containerStatus,
+      });
+    }
+  }, [logs, liveLogs, decodedContainerName]);
+
   // Filter logs for this specific container
   const filteredLogs = useMemo(() => {
     if (!logs) return [];
@@ -157,38 +225,19 @@ export default function ContainerLogsPage() {
     });
   }, [logs, decodedContainerName, searchQuery, levelFilter, statusFilter]);
 
-  // Container summary metrics & dynamic health status computed from logs
   const stats = useMemo(() => {
-    const containerLogs = logs
-      ? logs.filter(
-          (l) =>
-            !decodedContainerName ||
-            l.container_name === decodedContainerName ||
-            (!l.container_name && l.application_name === decodedContainerName)
-        )
-      : [];
+    const displayHost = lastKnownStats.host !== "cluster-node" 
+      ? lastKnownStats.host 
+      : "cluster-node";
 
-    const dbErrors = containerLogs.filter((l) => l.level === "ERROR").length;
-    const dbWarnings = containerLogs.filter((l) => l.level === "WARN").length;
-
-    const liveErrors = liveLogs.filter((l) => l.level === "ERROR").length;
-    const liveWarnings = liveLogs.filter((l) => l.level === "WARN").length;
-
-    const totalErrors = dbErrors + liveErrors;
-    const totalWarnings = dbWarnings + liveWarnings;
-    const totalEvents = containerLogs.length + liveLogs.length;
-
-    const host = containerLogs[0]?.host || containerLogs[0]?.server_name || liveLogs[0]?.host || "cluster-node";
-
-    let containerStatus: "HEALTHY" | "WARNING" | "CRITICAL" = "HEALTHY";
-    if (totalErrors > 0) {
-      containerStatus = "CRITICAL";
-    } else if (totalWarnings > 0) {
-      containerStatus = "WARNING";
-    }
-
-    return { total: totalEvents, errors: totalErrors, warnings: totalWarnings, host, status: containerStatus };
-  }, [logs, liveLogs, decodedContainerName]);
+    return {
+      total: lastKnownStats.total,
+      errors: lastKnownStats.errors,
+      warnings: lastKnownStats.warnings,
+      host: displayHost,
+      status: lastKnownStats.status,
+    };
+  }, [lastKnownStats]);
 
   return (
     <div className="space-y-6">
@@ -206,7 +255,7 @@ export default function ContainerLogsPage() {
               <Boxes className="w-5 h-5" />
             </div>
             <h1 className="text-xl font-bold text-white tracking-tight font-mono">
-              {decodedContainerName || "Container Logs"}
+              {currentApp ? `${currentApp.name} (${decodedContainerName})` : (decodedContainerName || "Container Logs")}
             </h1>
             <span
               className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${

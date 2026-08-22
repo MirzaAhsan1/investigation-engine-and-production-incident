@@ -1,4 +1,3 @@
-// src/api/monitoringApi.ts
 import { baseApi } from "./baseApi";
 import { QUERY_TAGS } from "../constants/queryTags";
 
@@ -46,10 +45,4 @@ export const monitoringApi = baseApi.injectEndpoints({
   }),
 });
 
-// Export hooks using baseApi (or monitoringApi.endpoints)
-export const {
-  useGetMonitoringMetricsQuery,
-  useGetServerStatsQuery
-} = baseApi.endpoints.getServerStats.useQuery
-    ? baseApi
-    : monitoringApi;
+export const { useGetMonitoringMetricsQuery, useGetServerStatsQuery } = monitoringApi;

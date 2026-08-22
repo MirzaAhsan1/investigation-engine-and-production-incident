@@ -22,7 +22,7 @@ router = APIRouter(
 
 
 @router.post(
-    "/",
+    "",
     response_model=ApplicationResponse,
 )
 def create(
@@ -37,7 +37,7 @@ def create(
 
 
 @router.get(
-    "/",
+    "",
     response_model=list[ApplicationResponse],
 )
 def list_applications(
