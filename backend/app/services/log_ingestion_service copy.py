@@ -220,9 +220,7 @@ def ingest_log_batch(db: Session, logs: list[LogIngestRequest]):
                     continue
 
                 # Run ML prediction ONLY
-                prediction = predict_incident(
-                    evidence=evidence
-                )
+                prediction = predict_incident(db=db, incident_id=incident.id)
 
                 # Add prediction to current response
                 res_item["ml_prediction"] = prediction

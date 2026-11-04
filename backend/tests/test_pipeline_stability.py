@@ -6,17 +6,29 @@ from app.models.application import Application
 from app.models.correlation_group import CorrelationGroup
 from app.models.investigation import Investigation
 from app.ml.feature_extractor import MISSING_VALUE_SENTINEL, extract_features
-from app.services.action_queue_service import approve_action, create_actions
+from app.services.action_queue_service import update_action_status, create_actions
 from app.services import evidence_service
+
+def approve_action(db, action, approved_by):
+    return update_action_status(
+        db=db,
+        action=action,
+        new_status=ActionStatusEnum.APPROVED,
+        approved_by=approved_by,
+    )
 
 
 class DummySession:
     def __init__(self):
         self.commits = 0
+        self.rollbacks = 0
         self.refreshed = []
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
     def refresh(self, obj):
         self.refreshed.append(obj)
@@ -25,9 +37,12 @@ class DummySession:
 def test_approve_action_marks_action_approved_before_execution(monkeypatch):
     db = DummySession()
     action = SimpleNamespace(
+        id=uuid.uuid4(),
         status=ActionStatusEnum.PENDING,
         approved_by=None,
         execution_log=None,
+        action_type="RESTART_APPLICATION",
+        target="coolify-resource-123",
     )
 
     def fake_execute_action(action_obj):
@@ -51,23 +66,14 @@ def test_approve_action_marks_action_approved_before_execution(monkeypatch):
 
 def test_extract_features_uses_missing_value_sentinel_for_null_metrics():
     evidence = SimpleNamespace(
-        cpu_usage=None,
-        memory_usage=10.0,
-        disk_usage=None,
-        disk_io_wait=None,
-        api_latency=None,
-        http_5xx_count=None,
-        http_4xx_count=None,
-        request_per_second=None,
+        log_count=None,
+        error_count=10.0,
+        warning_count=None,
         error_rate=None,
-        db_connections=None,
-        failed_login_attempts=None,
-        packet_loss=None,
-        network_latency=None,
-        restart_count=None,
-        active_containers=None,
-        deployment_changed=None,
-        ssl_certificate_days_left=None,
+        database_timeout_count=None,
+        cpu_usage=None,
+        memory_usage=None,
+        disk_usage=None,
     )
 
     features = extract_features(evidence)

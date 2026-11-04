@@ -5,6 +5,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Boolean
 )
 
 from sqlalchemy.orm import (
@@ -105,6 +106,16 @@ class SystemMetric(Base, BaseModel):
 
     request_count: Mapped[int | None] = mapped_column(
         Integer,
+        nullable=True,
+    )
+    
+    active_containers: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    
+    deployment_changed: Mapped[bool | None] = mapped_column(
+        Boolean,
         nullable=True,
     )
 

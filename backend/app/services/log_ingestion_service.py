@@ -20,9 +20,23 @@ from app.services.server_service import (
     create_server,
 )
 
+from app.integrations.coolify_client import CoolifyClient
+
 from app.services.application_service import (
     get_application_by_container,
     create_application,
+    is_internal_container,  # FIX (Bug 2): single source of truth,
+                             # same full blacklist used by
+                             # application_service.cleanup_duplicate_applications
+                             # and create_application(). The old local
+                             # INTERNAL_CONTAINER_PREFIXES ("fluent-bit-" only)
+                             # has been removed — it was a partial duplicate
+                             # of this list and let containers like
+                             # "postgres-*" / "redis-*" slip through here
+                             # even though create_application() was already
+                             # rejecting them (returning None), which could
+                             # crash downstream code that assumed
+                             # `application` was never None.
 )
 
 
@@ -100,6 +114,31 @@ def ingest_log_batch(
         for log in logs:
 
             # =================================================
+            # FIX (Bug 2): internal-container check now happens
+            # FIRST, before any server/application lookup or
+            # creation is attempted for this log line — using
+            # the same full blacklist as application_service.py
+            # (fluent-bit-, coolify-*, postgres-/postgresql-,
+            # redis-, mongodb-, etc.), not just "fluent-bit-".
+            #
+            # Previously this check ran AFTER create_application(),
+            # so an internal container could reach the fingerprint
+            # step with `application = None` (since
+            # create_application() already rejects internal
+            # containers and returns None) and crash on
+            # `application.id` / `application.name` below.
+            # =================================================
+
+            if is_internal_container(log.container_name):
+                results.append(
+                    {
+                        "status": "ignored",
+                        "reason": "Internal infrastructure container",
+                    }
+                )
+                continue
+
+            # =================================================
             # 2A. Resolve Server
             # =================================================
 
@@ -155,13 +194,53 @@ def ingest_log_batch(
 
                 if application is None:
 
+                    # FIX (Bug 1): resolve resource_uuid from
+                    # Coolify at creation time instead of hard-
+                    # coding None.
+                    #
+                    # CoolifyClient.get_application_uuid() looks
+                    # up Coolify's application list and matches
+                    # on the Coolify "name" field, then returns
+                    # its "uuid". This match is best-effort: if
+                    # Coolify's app name doesn't line up with our
+                    # container_name, or the Coolify API call
+                    # fails/times out, we fall back to None rather
+                    # than blocking ingestion — a later Coolify-
+                    # side reconciliation can still backfill it via
+                    # create_application()'s
+                    # `if payload.resource_uuid: existing.resource_uuid = ...`
+                    # update-in-place branch.
+                    #
+                    # NOTE: this adds a synchronous external HTTP
+                    # call the first time we see a given container,
+                    # not on every log line (subsequent lines hit
+                    # app_cache / get_application_by_container).
+                    resolved_uuid = None
+
+                    try:
+
+                        resolved_uuid = (
+                            CoolifyClient().get_application_uuid(
+                                log.container_name,
+                            )
+                        )
+
+                    except Exception as uuid_err:
+
+                        print(
+                            "[LOG INGEST] "
+                            "Could not resolve Coolify "
+                            f"resource_uuid for container "
+                            f"'{log.container_name}': {uuid_err}"
+                        )
+
                     class ApplicationPayload:
 
                         server_id = server.id
                         name = log.container_name
                         container_name = log.container_name
                         provider = "coolify"
-                        resource_uuid = None
+                        resource_uuid = resolved_uuid
 
                     application = create_application(
                         db=db,
@@ -177,6 +256,25 @@ def ingest_log_batch(
                 application = app_cache[
                     app_key
                 ]
+
+            # NOTE: is_internal_container() was already checked
+            # at the top of the loop, so `application` should not
+            # be None here from that cause. It can still be None
+            # only if create_application() itself failed for some
+            # other reason — guard rather than assume.
+            if application is None:
+
+                results.append(
+                    {
+                        "status": "error",
+                        "reason": (
+                            "Application could not be "
+                            "resolved or created"
+                        ),
+                    }
+                )
+
+                continue
 
             # =================================================
             # 2C. Determine Log Level
@@ -213,6 +311,11 @@ def ingest_log_batch(
                     ),
                     "container_name": (
                         log.container_name
+                    ),
+                    "application_name": (
+                        application.name
+                        if application
+                        else None
                     ),
                     "host": log.host,
                 }

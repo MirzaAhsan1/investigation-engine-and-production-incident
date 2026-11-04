@@ -19,6 +19,7 @@ from app.api.servers import router as servers_router
 from app.api.applications import router as applications_router
 from app.services.monitoring_scheduler import (
     monitoring_loop,
+    coolify_polling_loop,
 )
 from app.api.metrics import router as metrics_router
 from app.api.incident_evidence import router as incident_evidence_router  
@@ -36,6 +37,10 @@ async def lifespan(app):
         monitoring_loop()
     )
 
+    coolify_task = asyncio.create_task(
+        coolify_polling_loop()
+    )
+
     print(
         "[MONITORING] "
         "Automatic monitoring enabled."
@@ -48,14 +53,17 @@ async def lifespan(app):
     finally:
 
         monitoring_task.cancel()
+        coolify_task.cancel()
 
-        try:
+        for task in (monitoring_task, coolify_task):
 
-            await monitoring_task
+            try:
 
-        except asyncio.CancelledError:
+                await task
 
-            pass
+            except asyncio.CancelledError:
+
+                pass
 
         print(
             "[MONITORING] "

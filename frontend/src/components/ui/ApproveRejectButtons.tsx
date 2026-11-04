@@ -19,7 +19,8 @@ export const ApproveRejectButtons: React.FC<ApproveRejectButtonsProps> = ({
   isLoadingReject = false,
   disabled = false,
 }) => {
-  const isPending = status === "PENDING";
+  const statusUpper = (status || "").toUpperCase();
+  const isPending = statusUpper === "PENDING" || statusUpper === "PENDING_APPROVAL";
   const isDisabled = !isPending || disabled || isLoadingApprove || isLoadingReject;
 
   return (

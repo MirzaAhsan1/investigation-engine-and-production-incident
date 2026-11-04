@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from app.services.log_ingestion_service import ingest_log
+from app.services.log_ingestion_service import ingest_log_batch
+
+def ingest_log(db, log):
+    results = ingest_log_batch(db=db, logs=[log])
+    return results[0] if results else None
 
 
 class DummySession:

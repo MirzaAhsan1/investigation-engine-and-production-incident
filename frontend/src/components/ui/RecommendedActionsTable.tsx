@@ -1,12 +1,15 @@
 import React, { useState } from "react";
-import { Zap, AlertTriangle } from "lucide-react";
+import { Zap, AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "./Card";
 import { ActionStatusBadge } from "./ActionStatusBadge";
 import { ApproveRejectButtons } from "./ApproveRejectButtons";
 import { Skeleton } from "./Skeleton";
+import { Modal } from "./Modal";
+import { Button } from "./Button";
 import type { InvestigationAction } from "../../types/actions";
 import { useApproveActionMutation, useRejectActionMutation } from "../../api/actionsApi";
 import useAuthStore from "../../store/authStore";
+import { useToast } from "../../hooks/useToast";
 
 interface RecommendedActionsTableProps {
   actions?: InvestigationAction[];
@@ -21,32 +24,60 @@ export const RecommendedActionsTable: React.FC<RecommendedActionsTableProps> = (
 }) => {
   const user = useAuthStore((state) => state.user);
   const currentUserId = user?.id || user?.sub || "00000000-0000-0000-0000-000000000000";
+  const { toast } = useToast();
 
   const [approveAction] = useApproveActionMutation();
   const [rejectAction] = useRejectActionMutation();
 
   const [actionInProgress, setActionInProgress] = useState<Record<string, "approving" | "rejecting" | null>>({});
   const [apiError, setApiError] = useState<string | null>(null);
+  const [successBanner, setSuccessBanner] = useState<string | null>(null);
 
-  const handleApprove = async (actionId: string) => {
+  // State to manage 2-step confirmation modal
+  const [pendingAction, setPendingAction] = useState<{
+    action: InvestigationAction;
+    type: "approve" | "reject";
+  } | null>(null);
+
+  const handleInitiateApprove = (action: InvestigationAction) => {
     setApiError(null);
-    setActionInProgress((prev) => ({ ...prev, [actionId]: "approving" }));
-    try {
-      await approveAction({ action_id: actionId, approved_by: currentUserId }).unwrap();
-    } catch (err: any) {
-      setApiError(err?.data?.detail || "Failed to approve action. Please try again.");
-    } finally {
-      setActionInProgress((prev) => ({ ...prev, [actionId]: null }));
-    }
+    setSuccessBanner(null);
+    setPendingAction({ action, type: "approve" });
   };
 
-  const handleReject = async (actionId: string) => {
+  const handleInitiateReject = (action: InvestigationAction) => {
     setApiError(null);
-    setActionInProgress((prev) => ({ ...prev, [actionId]: "rejecting" }));
+    setSuccessBanner(null);
+    setPendingAction({ action, type: "reject" });
+  };
+
+  const handleConfirmAction = async () => {
+    if (!pendingAction) return;
+
+    const { action, type } = pendingAction;
+    const actionId = action.id;
+
+    // Close confirmation modal before executing action
+    setPendingAction(null);
+    setApiError(null);
+    setSuccessBanner(null);
+
+    setActionInProgress((prev) => ({ ...prev, [actionId]: type === "approve" ? "approving" : "rejecting" }));
+
     try {
-      await rejectAction({ action_id: actionId, approved_by: currentUserId }).unwrap();
+      if (type === "approve") {
+        await approveAction({ action_id: actionId, approved_by: currentUserId }).unwrap();
+        const msg = `Action '${action.title}' has been approved successfully.`;
+        setSuccessBanner(msg);
+        toast.success("Action Approved", msg);
+      } else {
+        await rejectAction({ action_id: actionId, approved_by: currentUserId }).unwrap();
+        const msg = `Action '${action.title}' has been rejected successfully.`;
+        setSuccessBanner(msg);
+        toast.success("Action Rejected", msg);
+      }
     } catch (err: any) {
-      setApiError(err?.data?.detail || "Failed to reject action. Please try again.");
+      setApiError(err?.data?.detail || `Failed to ${type} action. Please try again.`);
     } finally {
       setActionInProgress((prev) => ({ ...prev, [actionId]: null }));
     }
@@ -70,155 +101,240 @@ export const RecommendedActionsTable: React.FC<RecommendedActionsTableProps> = (
   }
 
   return (
-    <Card variant="glow">
-      <CardHeader>
-        <div className="flex items-center justify-between w-full">
-          <CardTitle><Zap className="w-4 h-4 text-violet-400" /> Recommended Actions</CardTitle>
-          <span className="text-xs text-slate-400">{actions.length} action{actions.length === 1 ? "" : "s"} generated</span>
-        </div>
-      </CardHeader>
-
-      <CardContent>
-        {(error || apiError) && (
-          <div className="mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400 text-xs flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-            <span>{error || apiError}</span>
+    <>
+      <Card variant="glow">
+        <CardHeader>
+          <div className="flex items-center justify-between w-full">
+            <CardTitle><Zap className="w-4 h-4 text-violet-400" /> Recommended Actions</CardTitle>
+            <span className="text-xs text-slate-400">{actions.length} action{actions.length === 1 ? "" : "s"} generated</span>
           </div>
-        )}
+        </CardHeader>
 
-        {actions.length === 0 ? (
-          <div className="text-center py-8 text-slate-500 text-xs">
-            No recommended actions available for this investigation yet.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            {/* Desktop Table View */}
-            <table className="w-full text-left text-xs border-collapse hidden md:table">
-              <thead>
-                <tr className="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider">
-                  <th className="pb-3 px-2">Priority</th>
-                  <th className="pb-3 px-2">Title</th>
-                  <th className="pb-3 px-2">Action Type</th>
-                  <th className="pb-3 px-2">Provider</th>
-                  <th className="pb-3 px-2">Target</th>
-                  <th className="pb-3 px-2">Confidence</th>
-                  <th className="pb-3 px-2">Status</th>
-                  <th className="pb-3 px-2 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {actions.map((act) => {
-                  const state = actionInProgress[act.id];
-                  return (
-                    <React.Fragment key={act.id}>
-                      <tr className="hover:bg-slate-900/40 transition-colors">
-                        <td className="py-3.5 px-2">
-                          <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-800 text-violet-300 font-bold text-xs">
-                            P{act.priority}
-                          </span>
-                        </td>
-                        <td className="py-3.5 px-2 font-medium text-slate-100 max-w-[220px] truncate">
-                          {act.title}
-                        </td>
-                        <td className="py-3.5 px-2 font-mono text-[11px] text-indigo-400">
-                          {act.action_type}
-                        </td>
-                        <td className="py-3.5 px-2">
-                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[10px] uppercase">
-                            {act.provider || "coolify"}
-                          </span>
-                        </td>
-                        <td className="py-3.5 px-2 font-mono text-[11px] text-slate-300">
-                          {act.target}
-                        </td>
-                        <td className="py-3.5 px-2 font-semibold text-violet-300">
-                          {Math.round(act.confidence)}%
-                        </td>
-                        <td className="py-3.5 px-2">
-                          <ActionStatusBadge status={act.status} />
-                        </td>
-                        <td className="py-3.5 px-2 text-right">
-                          <div className="flex justify-end">
-                            <ApproveRejectButtons
-                              status={act.status}
-                              onApprove={() => handleApprove(act.id)}
-                              onReject={() => handleReject(act.id)}
-                              isLoadingApprove={state === "approving"}
-                              isLoadingReject={state === "rejecting"}
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                      {act.execution_log && (
-                        <tr>
-                          <td colSpan={8} className="px-4 py-2.5 bg-slate-950/40 border-b border-slate-800/40">
-                            <div className="space-y-1">
-                              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Execution Log</p>
-                              <pre className="font-mono text-[11px] text-emerald-400 bg-slate-950 p-2.5 rounded-lg border border-slate-900 overflow-x-auto whitespace-pre-wrap max-h-40">
-                                {act.execution_log}
-                              </pre>
+        <CardContent>
+          {successBanner && (
+            <div className="mb-4 p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 text-xs flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                <span>{successBanner}</span>
+              </div>
+              <button
+                onClick={() => setSuccessBanner(null)}
+                className="text-emerald-400/70 hover:text-emerald-300 text-xs font-semibold px-1"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {(error || apiError) && (
+            <div className="mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400 text-xs flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+              <span>{error || apiError}</span>
+            </div>
+          )}
+
+          {actions.length === 0 ? (
+            <div className="text-center py-8 text-slate-500 text-xs">
+              No recommended actions available for this investigation yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              {/* Desktop Table View */}
+              <table className="w-full text-left text-xs border-collapse hidden md:table">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider">
+                    <th className="pb-3 px-2">Priority</th>
+                    <th className="pb-3 px-2">Title</th>
+                    <th className="pb-3 px-2">Action Type</th>
+                    <th className="pb-3 px-2">Provider</th>
+                    <th className="pb-3 px-2">Target</th>
+                    <th className="pb-3 px-2">Confidence</th>
+                    <th className="pb-3 px-2">Status</th>
+                    <th className="pb-3 px-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {actions.map((act) => {
+                    const state = actionInProgress[act.id];
+                    return (
+                      <React.Fragment key={act.id}>
+                        <tr className="hover:bg-slate-900/40 transition-colors">
+                          <td className="py-3.5 px-2">
+                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-800 text-violet-300 font-bold text-xs">
+                              P{act.priority}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-2 font-medium text-slate-100 max-w-[220px] truncate">
+                            {act.title}
+                          </td>
+                          <td className="py-3.5 px-2 font-mono text-[11px] text-indigo-400">
+                            {act.action_type}
+                          </td>
+                          <td className="py-3.5 px-2">
+                            <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[10px] uppercase">
+                              {act.provider || "coolify"}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-2 font-mono text-[11px] text-slate-300">
+                            {act.target}
+                          </td>
+                          <td className="py-3.5 px-2 font-semibold text-violet-300">
+                            {Math.round(act.confidence)}%
+                          </td>
+                          <td className="py-3.5 px-2">
+                            <ActionStatusBadge status={act.status} />
+                          </td>
+                          <td className="py-3.5 px-2 text-right">
+                            <div className="flex justify-end">
+                              <ApproveRejectButtons
+                                status={act.status}
+                                onApprove={() => handleInitiateApprove(act)}
+                                onReject={() => handleInitiateReject(act)}
+                                isLoadingApprove={state === "approving"}
+                                isLoadingReject={state === "rejecting"}
+                              />
                             </div>
                           </td>
                         </tr>
+                        {act.execution_log && (
+                          <tr>
+                            <td colSpan={8} className="px-4 py-2.5 bg-slate-950/40 border-b border-slate-800/40">
+                              <div className="space-y-1">
+                                <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Execution Log</p>
+                                <pre className="font-mono text-[11px] text-emerald-400 bg-slate-950 p-2.5 rounded-lg border border-slate-900 overflow-x-auto whitespace-pre-wrap max-h-40">
+                                  {act.execution_log}
+                                </pre>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+
+              {/* Mobile Card View */}
+              <div className="space-y-3 md:hidden">
+                {actions.map((act) => {
+                  const state = actionInProgress[act.id];
+                  return (
+                    <div key={act.id} className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="w-5 h-5 rounded-full bg-slate-800 text-violet-300 font-bold text-[10px] flex items-center justify-center">
+                            P{act.priority}
+                          </span>
+                          <span className="font-mono text-[10px] text-indigo-400">{act.action_type}</span>
+                        </div>
+                        <ActionStatusBadge status={act.status} />
+                      </div>
+
+                      <div>
+                        <p className="text-sm font-semibold text-slate-100">{act.title}</p>
+                        <div className="flex flex-wrap items-center gap-3 mt-1 text-xs text-slate-400">
+                          <span>Target: <code className="text-slate-300">{act.target}</code></span>
+                          <span>·</span>
+                          <span className="text-violet-300 font-bold">{Math.round(act.confidence)}% Confidence</span>
+                          <span>·</span>
+                          <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[9px] uppercase">{act.provider || "coolify"}</span>
+                        </div>
+                      </div>
+
+                      {act.execution_log && (
+                        <div className="p-2.5 bg-slate-950 border border-slate-900 rounded-lg space-y-1">
+                          <p className="text-[9px] font-semibold text-slate-500 uppercase tracking-wider">Execution Log</p>
+                          <pre className="font-mono text-[10px] text-emerald-400 whitespace-pre-wrap max-h-32 overflow-y-auto">
+                            {act.execution_log}
+                          </pre>
+                        </div>
                       )}
-                    </React.Fragment>
+
+                      <div className="pt-2 border-t border-slate-800/60 flex justify-end">
+                        <ApproveRejectButtons
+                          status={act.status}
+                          onApprove={() => handleInitiateApprove(act)}
+                          onReject={() => handleInitiateReject(act)}
+                          isLoadingApprove={state === "approving"}
+                          isLoadingReject={state === "rejecting"}
+                        />
+                      </div>
+                    </div>
                   );
                 })}
-              </tbody>
-            </table>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
-            {/* Mobile Card View */}
-            <div className="space-y-3 md:hidden">
-              {actions.map((act) => {
-                const state = actionInProgress[act.id];
-                return (
-                  <div key={act.id} className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="w-5 h-5 rounded-full bg-slate-800 text-violet-300 font-bold text-[10px] flex items-center justify-center">
-                          P{act.priority}
-                        </span>
-                        <span className="font-mono text-[10px] text-indigo-400">{act.action_type}</span>
-                      </div>
-                      <ActionStatusBadge status={act.status} />
-                    </div>
+      {/* Confirmation Modal */}
+      {pendingAction && (
+        <Modal
+          isOpen={!!pendingAction}
+          onClose={() => setPendingAction(null)}
+          title={pendingAction.type === "approve" ? "Confirm Action Approval" : "Confirm Action Rejection"}
+          maxWidth="md"
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-slate-300 leading-relaxed">
+              {pendingAction.type === "approve" ? (
+                <>
+                  Are you sure you want to approve{" "}
+                  <strong className="text-slate-100 font-semibold">&quot;{pendingAction.action.title}&quot;</strong>? This
+                  will execute: <code className="text-indigo-400 font-mono font-semibold">{pendingAction.action.action_type}</code> on{" "}
+                  <code className="text-slate-200 font-mono">{pendingAction.action.target}</code>.
+                </>
+              ) : (
+                <>
+                  Are you sure you want to reject{" "}
+                  <strong className="text-slate-100 font-semibold">&quot;{pendingAction.action.title}&quot;</strong>? This
+                  action will not be executed.
+                </>
+              )}
+            </p>
 
-                    <div>
-                      <p className="text-sm font-semibold text-slate-100">{act.title}</p>
-                      <div className="flex flex-wrap items-center gap-3 mt-1 text-xs text-slate-400">
-                        <span>Target: <code className="text-slate-300">{act.target}</code></span>
-                        <span>·</span>
-                        <span className="text-violet-300 font-bold">{Math.round(act.confidence)}% Confidence</span>
-                        <span>·</span>
-                        <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[9px] uppercase">{act.provider || "coolify"}</span>
-                      </div>
-                    </div>
+            <div className="p-3 bg-slate-950/60 border border-slate-800/80 rounded-lg text-xs space-y-1.5">
+              <div className="flex justify-between items-center text-slate-400">
+                <span className="text-slate-500">Action Type:</span>
+                <code className="text-indigo-400 font-mono">{pendingAction.action.action_type}</code>
+              </div>
+              <div className="flex justify-between items-center text-slate-400">
+                <span className="text-slate-500">Target:</span>
+                <code className="text-slate-300 font-mono">{pendingAction.action.target}</code>
+              </div>
+              <div className="flex justify-between items-center text-slate-400">
+                <span className="text-slate-500">Confidence:</span>
+                <span className="text-violet-300 font-semibold">{Math.round(pendingAction.action.confidence)}%</span>
+              </div>
+            </div>
 
-                    {act.execution_log && (
-                      <div className="p-2.5 bg-slate-950 border border-slate-900 rounded-lg space-y-1">
-                        <p className="text-[9px] font-semibold text-slate-500 uppercase tracking-wider">Execution Log</p>
-                        <pre className="font-mono text-[10px] text-emerald-400 whitespace-pre-wrap max-h-32 overflow-y-auto">
-                          {act.execution_log}
-                        </pre>
-                      </div>
-                    )}
-
-                    <div className="pt-2 border-t border-slate-800/60 flex justify-end">
-                      <ApproveRejectButtons
-                        status={act.status}
-                        onApprove={() => handleApprove(act.id)}
-                        onReject={() => handleReject(act.id)}
-                        isLoadingApprove={state === "approving"}
-                        isLoadingReject={state === "rejecting"}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800/80">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setPendingAction(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant={pendingAction.type === "approve" ? "primary" : "danger"}
+                size="sm"
+                onClick={handleConfirmAction}
+                leftIcon={
+                  pendingAction.type === "approve" ? (
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                  ) : (
+                    <XCircle className="w-3.5 h-3.5" />
+                  )
+                }
+              >
+                {pendingAction.type === "approve" ? "Confirm Approval" : "Confirm Rejection"}
+              </Button>
             </div>
           </div>
-        )}
-      </CardContent>
-    </Card>
+        </Modal>
+      )}
+    </>
   );
 };

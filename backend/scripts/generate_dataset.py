@@ -326,6 +326,13 @@ def generate_dataset():
         database_mask
     )[0]
 
+    # Track which rows are DB-connection-exhaustion type,
+    # used below to drive database_timeout_count.
+    database_connections_mask = np.zeros(
+        n,
+        dtype=bool,
+    )
+
     for index, incident_type in zip(
         database_indexes,
         database_types,
@@ -337,6 +344,8 @@ def generate_dataset():
                 90,
                 150,
             )
+
+            database_connections_mask[index] = True
 
         else:
 
@@ -366,6 +375,13 @@ def generate_dataset():
         security_mask
     )[0]
 
+    # Track which rows are LOGIN type, used below to drive
+    # log_count/error_count/warning_count.
+    security_login_mask = np.zeros(
+        n,
+        dtype=bool,
+    )
+
     for index, incident_type in zip(
         security_indexes,
         security_types,
@@ -377,6 +393,8 @@ def generate_dataset():
                 10,
                 50,
             )
+
+            security_login_mask[index] = True
 
         elif incident_type == "NETWORK":
 
@@ -396,6 +414,116 @@ def generate_dataset():
                 0,
                 10,
             )
+
+    # ========================================================
+    # LOG-BASED METRICS
+    #
+    # These didn't exist in the original generator, but
+    # log_count / error_count / warning_count /
+    # database_timeout_count are 4 of our 16 REAL model
+    # features (they come from Fluent Bit logs in production,
+    # not SystemMetric). Added here — AFTER all category-
+    # specific mutations above — so they stay internally
+    # consistent with the final error_rate / incident type
+    # for each row, instead of contradicting them.
+    # ========================================================
+
+    # Baseline log volume: every app produces some log lines
+    # regardless of incident state.
+    log_count = clip(
+        rng.poisson(
+            12,
+            n,
+        ),
+        1,
+        None,
+    ).astype(int)
+
+    # Incidents naturally come with more noise in the logs.
+    log_count[
+        deployment_mask
+    ] += rng.integers(
+        10,
+        60,
+        deployment_mask.sum(),
+    )
+
+    log_count[
+        infrastructure_mask
+    ] += rng.integers(
+        5,
+        30,
+        infrastructure_mask.sum(),
+    )
+
+    log_count[
+        database_mask
+    ] += rng.integers(
+        5,
+        40,
+        database_mask.sum(),
+    )
+
+    log_count[
+        security_login_mask
+    ] += rng.integers(
+        10,
+        50,
+        security_login_mask.sum(),
+    )
+
+    # error_count derived FROM the already-generated
+    # error_rate, so the two fields never contradict each
+    # other (error_rate ≈ error_count / log_count).
+    error_count = clip(
+        np.round(
+            log_count * error_rate
+        ),
+        0,
+        log_count,
+    ).astype(int)
+
+    # Warnings: low baseline, elevated for infra pressure and
+    # bad deployments (both tend to log warnings before they
+    # escalate to hard errors).
+    warning_count = rng.poisson(
+        2,
+        n,
+    ).astype(int)
+
+    warning_count[
+        infrastructure_mask
+    ] += rng.integers(
+        2,
+        10,
+        infrastructure_mask.sum(),
+    )
+
+    warning_count[
+        deployment_mask
+    ] += rng.integers(
+        2,
+        8,
+        deployment_mask.sum(),
+    )
+
+    # database_timeout_count: near-zero baseline everywhere,
+    # spikes specifically for DB-connection-exhaustion rows
+    # (this is the field database_timeout_count is meant to
+    # capture — "timeout"/"queuepool"/"connection pool"
+    # keywords in real logs).
+    database_timeout_count = rng.poisson(
+        0.1,
+        n,
+    ).astype(int)
+
+    database_timeout_count[
+        database_connections_mask
+    ] = rng.integers(
+        5,
+        20,
+        database_connections_mask.sum(),
+    )
 
     # ========================================================
     # CAUSE
@@ -515,6 +643,27 @@ def generate_dataset():
     df = pd.DataFrame(
         {
 
+            # ----------------------------------------------
+            # Log-based fields (added — required by our
+            # real FEATURE_COLUMNS, weren't here before)
+            # ----------------------------------------------
+
+            "log_count": log_count,
+
+            "error_count": error_count,
+
+            "warning_count": warning_count,
+
+            "database_timeout_count": (
+                database_timeout_count
+            ),
+
+            "error_rate": error_rate,
+
+            # ----------------------------------------------
+            # Original fields
+            # ----------------------------------------------
+
             "cpu_usage": cpu_usage,
 
             "memory_usage": memory_usage,
@@ -530,8 +679,6 @@ def generate_dataset():
             "http_4xx_count": http_4xx_count,
 
             "request_per_second": request_per_second,
-
-            "error_rate": error_rate,
 
             "db_connections": db_connections,
 

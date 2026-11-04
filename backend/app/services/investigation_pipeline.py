@@ -2,7 +2,6 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.models.evidence import Evidence
 from app.models.incident import Incident
 from app.models.investigation import Investigation
 
@@ -10,6 +9,7 @@ from app.enums.analysis_status import AnalysisStatusEnum
 
 from app.services.action_queue_service import create_actions
 from app.services.ml_service import predict_incident
+from app.services.evidence_service import aggregate_incident_evidence
 from app.services.report_generator import build_report
 
 from app.ai.llm_service import investigate
@@ -33,7 +33,8 @@ def start_investigation(
 
         Incident
            +
-        Latest Evidence
+        Aggregated Evidence (ALL correlation groups combined,
+        not just the latest one)
            ↓
         ML Prediction
            ↓
@@ -46,17 +47,21 @@ def start_investigation(
     NOTE:
 
     Evidence is one-to-many with Incident: an incident can
-    accumulate multiple Evidence rows over time (e.g. when
-    the same application keeps generating related
-    correlation groups and the incident is reused instead
-    of a brand new one being created).
+    accumulate multiple Evidence rows over time (e.g. when the
+    same application keeps generating related correlation
+    groups and the incident is reused instead of a brand new
+    one being created).
+
+    ML and LLM both receive the SAME aggregated, incident-level
+    evidence view built by aggregate_incident_evidence() — this
+    combines counts across the incident's full lifetime while
+    keeping raw log text bounded to a recent window, so neither
+    ML nor LLM is working from a stale or partial snapshot.
 
     Investigation stays one-to-one with Incident: if an
     Investigation already exists for this incident, it is
     UPDATED with a fresh ML + LLM run using the latest
-    Evidence, rather than being skipped. This keeps the
-    diagnosis current as new signal comes in, instead of
-    freezing on the first analysis.
+    aggregated Evidence, rather than being skipped.
     """
 
     # ========================================================
@@ -72,22 +77,16 @@ def start_investigation(
         return None
 
     # ========================================================
-    # 2. Get Latest Evidence
+    # 2. Get Incident-Level Aggregated Evidence
     #
-    # Evidence is one-to-many with Incident now, so we take
-    # the most recently created row.
+    # Same aggregation used internally by predict_incident() —
+    # built here too so it can be passed to the LLM alongside
+    # the ML prediction.
     # ========================================================
 
-    evidence = (
-        db.query(Evidence)
-        .filter(
-            Evidence.incident_id
-            == incident.id,
-        )
-        .order_by(
-            Evidence.created_at.desc(),
-        )
-        .first()
+    evidence = aggregate_incident_evidence(
+        db=db,
+        incident_id=incident.id,
     )
 
     if evidence is None:
@@ -113,15 +112,14 @@ def start_investigation(
     # ========================================================
     # 4. ML Prediction
     #
-    # ML receives BOTH:
-    #
-    # Incident
-    # Latest Evidence
+    # ML receives incident_id and builds the SAME aggregated
+    # evidence internally (ml_service.py also calls
+    # aggregate_incident_evidence()).
     # ========================================================
 
     prediction = predict_incident(
-        incident=incident,
-        evidence=evidence,
+        db=db,
+        incident_id=incident.id,
     )
 
     if not prediction:
@@ -166,7 +164,7 @@ def start_investigation(
     # LLM receives:
     #
     # Incident
-    # Latest Evidence
+    # Aggregated Evidence (same as ML used)
     # ML Prediction
     # ========================================================
 
@@ -287,8 +285,7 @@ def start_investigation(
         # ----------------------------------------------------
         # Update in place — keeps the one-to-one relationship
         # with Incident, but refreshes the diagnosis using
-        # the latest evidence instead of freezing on the
-        # first analysis.
+        # the latest aggregated evidence.
         # ----------------------------------------------------
 
         investigation = existing_investigation
@@ -316,13 +313,9 @@ def start_investigation(
 
             incident_id=incident.id,
 
-            predicted_category=(
-                predicted_category
-            ),
+            predicted_category=predicted_category,
 
-            predicted_cause=(
-                predicted_cause
-            ),
+            predicted_cause=predicted_cause,
 
             confidence=confidence,
 
@@ -335,14 +328,10 @@ def start_investigation(
             reasoning=reasoning,
 
             recommended_actions=(
-                "\n".join(
-                    action_titles
-                )
+                "\n".join(action_titles)
             ),
 
-            llm_confidence=(
-                llm_confidence
-            ),
+            llm_confidence=llm_confidence,
 
             triggered_rules=[],
 
@@ -351,9 +340,7 @@ def start_investigation(
             ),
         )
 
-        db.add(
-            investigation
-        )
+        db.add(investigation)
 
     db.flush()
 
@@ -444,19 +431,12 @@ def get_full_report(
         return None
 
     # ========================================================
-    # Latest Evidence
+    # Aggregated Evidence
     # ========================================================
 
-    evidence = (
-        db.query(Evidence)
-        .filter(
-            Evidence.incident_id
-            == incident_id,
-        )
-        .order_by(
-            Evidence.created_at.desc(),
-        )
-        .first()
+    evidence = aggregate_incident_evidence(
+        db=db,
+        incident_id=incident_id,
     )
 
     if evidence is None:

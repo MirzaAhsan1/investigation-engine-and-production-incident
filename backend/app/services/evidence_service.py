@@ -2,6 +2,8 @@ from uuid import UUID
 
 from datetime import timedelta
 
+from types import SimpleNamespace
+
 from sqlalchemy.orm import Session
 
 from app.models.application import Application
@@ -26,6 +28,22 @@ DATABASE_TIMEOUT_KEYWORDS = (
     "db timeout",
     "connection timeout",
     "connection pool",
+)
+
+
+# ============================================================
+# Failed Login Keywords
+# ============================================================
+
+FAILED_LOGIN_KEYWORDS = (
+    "login failed",
+    "failed login",
+    "invalid credentials",
+    "invalid password",
+    "authentication failed",
+    "auth failed",
+    "unauthorized login attempt",
+    "login attempt failed",
 )
 
 
@@ -121,6 +139,40 @@ def calculate_database_timeout_count(
 
 
 # ============================================================
+# Calculate Failed Login Attempts
+# ============================================================
+
+def calculate_failed_login_attempts(
+    logs: list[LogEvent],
+) -> int:
+    """
+    Count actual occurrences of failed-login / auth-failure
+    events from a monitored application's real logs.
+
+    NOTE: this tracks the MONITORED application's own auth
+    failures (e.g. a brute-force attempt against a client's
+    app) — it has nothing to do with APIRS's own dashboard
+    login (app/services/auth_service.py).
+    """
+
+    count = 0
+
+    for log in logs:
+
+        message = (
+            log.message or ""
+        ).lower()
+
+        if any(
+            keyword in message
+            for keyword in FAILED_LOGIN_KEYWORDS
+        ):
+            count += get_log_occurrence_count(log)
+
+    return count
+
+
+# ============================================================
 # Combine Logs
 # ============================================================
 
@@ -199,6 +251,46 @@ def get_metrics_for_group(db: Session, group: CorrelationGroup):
 
     return query.order_by(SystemMetric.timestamp.asc()).all()
 
+
+def get_application_metrics_for_group(
+    db: Session,
+    group: CorrelationGroup,
+):
+    """
+    active_containers / deployment_changed are per-application
+    (unlike CPU/memory which are server-wide), so this query
+    filters by application_id too — otherwise App A's container
+    status could leak into App B's evidence just because they
+    share a server.
+    """
+
+    if group.application_id is None:
+        return []
+
+    query = (
+        db.query(SystemMetric)
+        .filter(
+            SystemMetric.client_id == group.client_id,
+            SystemMetric.server_id == group.server_id,
+            SystemMetric.application_id == group.application_id,
+        )
+    )
+
+    buffer = timedelta(minutes=METRICS_WINDOW_BUFFER_MINUTES)
+
+    if group.first_seen is not None:
+        query = query.filter(
+            SystemMetric.timestamp >= group.first_seen - buffer
+        )
+
+    if group.last_seen is not None:
+        query = query.filter(
+            SystemMetric.timestamp <= group.last_seen + buffer
+        )
+
+    return query.order_by(SystemMetric.timestamp.asc()).all()
+
+
 # ============================================================
 # Aggregate System Metrics
 # ============================================================
@@ -218,6 +310,12 @@ def aggregate_system_metrics(
 
     This function takes the latest non-null value of each
     metric from the correlation group's real time window.
+
+    active_containers / deployment_changed come from a
+    SEPARATE, application-scoped query (see
+    get_application_metrics_for_group) since — unlike
+    CPU/memory/disk — they belong to one specific application,
+    not the whole server.
 
     Example:
 
@@ -239,6 +337,11 @@ def aggregate_system_metrics(
         group=group,
     )
 
+    app_metrics = get_application_metrics_for_group(
+        db=db,
+        group=group,
+    )
+
     result = {
         "cpu_usage": None,
         "memory_usage": None,
@@ -249,13 +352,15 @@ def aggregate_system_metrics(
         "http_4xx_count": None,
         "request_per_second": None,
         "request_count": None,
+        "active_containers": None,
+        "deployment_changed": None,
     }
 
-    if not metrics:
+    if not metrics and not app_metrics:
         return result
 
     # --------------------------------------------------------
-    # Metrics are ordered ASC.
+    # Server-wide metrics are ordered ASC.
     #
     # We iterate from newest -> oldest so the first non-null
     # value for each field is the latest value.
@@ -320,12 +425,48 @@ def aggregate_system_metrics(
             result["request_count"] = metric.request_count
 
         # ----------------------------------------------------
-        # Stop once every available metric has been found.
+        # Stop once every server-wide metric has been found.
+        # (active_containers/deployment_changed are handled
+        # separately below from the app-scoped query.)
         # ----------------------------------------------------
 
         if all(
             value is not None
-            for value in result.values()
+            for key, value in result.items()
+            if key not in (
+                "active_containers",
+                "deployment_changed",
+            )
+        ):
+            break
+
+    # --------------------------------------------------------
+    # active_containers / deployment_changed — from the
+    # application-scoped Coolify status rows only, so one
+    # app's container status can never leak into another's.
+    # --------------------------------------------------------
+
+    for metric in reversed(app_metrics):
+
+        if (
+            result["active_containers"] is None
+            and metric.active_containers is not None
+        ):
+            result["active_containers"] = (
+                metric.active_containers
+            )
+
+        if (
+            result["deployment_changed"] is None
+            and metric.deployment_changed is not None
+        ):
+            result["deployment_changed"] = (
+                metric.deployment_changed
+            )
+
+        if (
+            result["active_containers"] is not None
+            and result["deployment_changed"] is not None
         ):
             break
 
@@ -444,6 +585,16 @@ def build_evidence_from_group(
 
     database_timeout_count = (
         calculate_database_timeout_count(
+            logs
+        )
+    )
+
+    # ========================================================
+    # 5b. Real Failed Login Attempts
+    # ========================================================
+
+    failed_login_attempts = (
+        calculate_failed_login_attempts(
             logs
         )
     )
@@ -577,15 +728,20 @@ def build_evidence_from_group(
             "http_4xx_count"
         ],
 
-        # These fields are not currently present
-        # in SystemMetric.
+        # restart_count / pod_restart_count remain out of
+        # scope for now (no k8s, and Coolify exposes no raw
+        # restart counter) — always None until that's revisited.
         "restart_count": None,
 
-        "active_containers": None,
+        "active_containers": metric_data[
+            "active_containers"
+        ],
 
         "pod_restart_count": None,
 
-        "deployment_changed": None,
+        "deployment_changed": metric_data[
+            "deployment_changed"
+        ],
 
         # ====================================================
         # Database Metrics
@@ -599,15 +755,12 @@ def build_evidence_from_group(
         # Security Metrics
         # ====================================================
 
-        "failed_login_attempts": None,
+        "failed_login_attempts": failed_login_attempts,
 
         "ssl_certificate_days_left": None,
     }
 
 
-# ============================================================
-# Create Evidence From Correlation Group
-# ============================================================
 # ============================================================
 # Create Evidence From Correlation Group
 # ============================================================
@@ -736,4 +889,162 @@ def get_evidence_by_incident(db: Session, incident_id: UUID):
         .filter(Evidence.incident_id == incident_id)
         .order_by(Evidence.created_at.desc())
         .first()
+    )
+
+
+# ============================================================
+# Aggregate ALL Evidence For An Incident (incident-level view)
+# ============================================================
+
+RECENT_EVIDENCE_LOG_LIMIT = 10
+LOG_TEXT_CHAR_CAP = 8000
+
+
+def aggregate_incident_evidence(
+    db: Session,
+    incident_id: UUID,
+):
+    """
+    Build ONE incident-level evidence view from ALL Evidence
+    rows tied to this incident (across every CorrelationGroup
+    that fed into it) — instead of only the latest snapshot.
+
+    Used by both ML (ml_service.py) and LLM
+    (investigation_pipeline.py) so they always see the SAME,
+    complete picture of the incident's lifetime, not just its
+    most recent burst.
+
+    Strategy:
+        - Counts (log_count, error_count, warning_count,
+          database_timeout_count) are SUMMED across every
+          Evidence row — cheap, always accurate, reflects the
+          incident's full history.
+        - error_rate is recomputed from the summed counts.
+        - Metrics (cpu_usage, memory_usage, etc.) and metadata
+          (service_name, environment) come from the LATEST row
+          only — they represent current state, not something
+          to sum/average.
+        - Raw log text is combined from only the most recent
+          RECENT_EVIDENCE_LOG_LIMIT rows, further capped at
+          LOG_TEXT_CHAR_CAP characters, to keep prompts bounded
+          for long-running incidents.
+
+    Returns an Evidence-shaped object (SimpleNamespace) so
+    downstream code (extract_features, build_prompt) can keep
+    accessing fields via dot notation exactly as it does for a
+    real Evidence row.
+    """
+
+    rows = (
+        db.query(Evidence)
+        .filter(
+            Evidence.incident_id == incident_id
+        )
+        .order_by(
+            Evidence.created_at.asc()
+        )
+        .all()
+    )
+
+    if not rows:
+        return None
+
+    # --------------------------------------------------------
+    # Sum count-like fields across ALL rows
+    # --------------------------------------------------------
+
+    log_count = sum(r.log_count or 0 for r in rows)
+    error_count = sum(r.error_count or 0 for r in rows)
+    warning_count = sum(r.warning_count or 0 for r in rows)
+    database_timeout_count = sum(
+        r.database_timeout_count or 0 for r in rows
+    )
+
+    error_rate = (
+        error_count / log_count
+        if log_count > 0
+        else 0.0
+    )
+
+    first_seen = min(
+        (
+            r.first_seen
+            for r in rows
+            if r.first_seen is not None
+        ),
+        default=None,
+    )
+
+    last_seen = max(
+        (
+            r.last_seen
+            for r in rows
+            if r.last_seen is not None
+        ),
+        default=None,
+    )
+
+    # --------------------------------------------------------
+    # Latest row — for point-in-time metrics / metadata
+    # --------------------------------------------------------
+
+    latest = rows[-1]
+
+    # --------------------------------------------------------
+    # Combine raw log text — only the most recent N rows,
+    # further capped by character count
+    # --------------------------------------------------------
+
+    recent_rows = rows[-RECENT_EVIDENCE_LOG_LIMIT:]
+
+    combined_logs = "\n".join(
+        r.logs for r in recent_rows if r.logs
+    )
+
+    if len(combined_logs) > LOG_TEXT_CHAR_CAP:
+        combined_logs = (
+            "...[earlier logs truncated]...\n"
+            + combined_logs[-LOG_TEXT_CHAR_CAP:]
+        )
+
+    # --------------------------------------------------------
+    # Return an Evidence-shaped object
+    # --------------------------------------------------------
+
+    return SimpleNamespace(
+        incident_id=incident_id,
+
+        log_count=log_count,
+        error_count=error_count,
+        warning_count=warning_count,
+        first_seen=first_seen,
+        last_seen=last_seen,
+        error_rate=error_rate,
+        database_timeout_count=database_timeout_count,
+        logs=combined_logs,
+
+        service_name=latest.service_name,
+        environment=latest.environment,
+
+        cpu_usage=latest.cpu_usage,
+        memory_usage=latest.memory_usage,
+        disk_usage=latest.disk_usage,
+        disk_io_wait=latest.disk_io_wait,
+
+        api_latency=latest.api_latency,
+        network_latency=latest.network_latency,
+        packet_loss=latest.packet_loss,
+        request_per_second=latest.request_per_second,
+
+        http_5xx_count=latest.http_5xx_count,
+        http_4xx_count=latest.http_4xx_count,
+        restart_count=latest.restart_count,
+        active_containers=latest.active_containers,
+        pod_restart_count=latest.pod_restart_count,
+        deployment_changed=latest.deployment_changed,
+
+        db_connections=latest.db_connections,
+
+        failed_login_attempts=latest.failed_login_attempts,
+        ssl_certificate_days_left=latest.ssl_certificate_days_left,
     )

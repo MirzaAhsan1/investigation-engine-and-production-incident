@@ -1,3 +1,4 @@
+from app.models import application
 import requests
 
 from app.core.config import settings
@@ -169,6 +170,32 @@ class CoolifyClient:
             f"/applications/{uuid}/deploy",
 
         )
+
+    
+    def get_application_by_uuid(self, resource_uuid: str):
+        """Fetch application directly by Coolify UUID."""
+        return self._request("GET", f"/applications/{resource_uuid}")
+
+    def get_application_status(self, resource_uuid: str) -> str | None:
+        """Returns raw status string e.g. 'running:healthy'."""
+        application = self.get_application_by_uuid(resource_uuid)
+        if application is None:
+            return None
+        return application.get("status")
+
+    def get_deployments(self, resource_uuid: str):
+        """List deployments, filtered client-side by application_uuid."""
+        deployments = self._request("GET", "/deployments")
+        if not deployments:
+            return []
+        return [d for d in deployments if d.get("application_uuid") == resource_uuid]
+
+    def get_latest_deployment(self, resource_uuid: str):
+        """Most recent deployment by created_at, or None."""
+        deployments = self.get_deployments(resource_uuid)
+        if not deployments:
+            return None
+        return max(deployments, key=lambda d: d.get("created_at") or "")
 
 
 

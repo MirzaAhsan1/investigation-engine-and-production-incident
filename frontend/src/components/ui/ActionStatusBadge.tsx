@@ -11,6 +11,7 @@ export type ActionStatus =
 
 const statusStyles: Record<string, string> = {
   PENDING: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+  PENDING_APPROVAL: "bg-amber-500/15 text-amber-400 border-amber-500/30",
   APPROVED: "bg-teal-500/15 text-teal-400 border-teal-500/30",
   PENDING_EXECUTION: "bg-blue-500/15 text-blue-400 border-blue-500/30",
   RUNNING: "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",

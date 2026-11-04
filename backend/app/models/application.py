@@ -4,7 +4,9 @@ from sqlalchemy import (
     String,
     Boolean,
     ForeignKey,
+    DateTime
 )
+from datetime import datetime
 
 from sqlalchemy.orm import (
     Mapped,
@@ -55,4 +57,8 @@ class Application(Base, BaseModel):
     server = relationship(
         "Server",
         back_populates="applications",
+    )
+    last_known_deployment_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )

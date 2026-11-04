@@ -20,12 +20,12 @@ except FileNotFoundError:
 
 
 def _model_not_available_result(
-    incident,
+    incident_id,
 ):
     return {
         "incident_id": (
-            str(incident.id)
-            if incident is not None
+            str(incident_id)
+            if incident_id is not None
             else None
         ),
 
@@ -48,7 +48,7 @@ def _model_not_available_result(
 
 
 def predict(
-    incident,
+    incident_id,
     evidence,
 ):
     """
@@ -56,7 +56,7 @@ def predict(
 
     Flow:
 
-        Incident
+        incident_id
             +
         Evidence
             ↓
@@ -71,9 +71,9 @@ def predict(
     # 1. Validate Inputs
     # ======================================================
 
-    if incident is None:
+    if incident_id is None:
         raise ValueError(
-            "Incident is required for ML prediction"
+            "incident_id is required for ML prediction"
         )
 
     if evidence is None:
@@ -87,7 +87,7 @@ def predict(
 
     if model is None:
         return _model_not_available_result(
-            incident=incident,
+            incident_id=incident_id,
         )
 
     # ======================================================
@@ -186,7 +186,7 @@ def predict(
 
     return {
         "incident_id": str(
-            incident.id
+            incident_id
         ),
 
         "predicted_category": (

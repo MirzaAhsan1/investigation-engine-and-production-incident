@@ -61,8 +61,25 @@ export default function ContainerLogsPage() {
 
   const currentApp = useMemo(() => {
     if (!applications) return null;
-    return applications.find((app) => app.container_name === decodedContainerName);
+    return applications.find(
+      (app) =>
+        app.container_name === decodedContainerName ||
+        app.name === decodedContainerName ||
+        app.id === decodedContainerName ||
+        (app.resource_uuid && app.resource_uuid === decodedContainerName)
+    );
   }, [applications, decodedContainerName]);
+
+  // Keep a live ref to currentApp so WebSocket callbacks always use latest metadata without stale closures
+  const currentAppRef = useRef(currentApp);
+  useEffect(() => {
+    currentAppRef.current = currentApp;
+  }, [currentApp]);
+
+  // Clear live logs when container selection changes
+  useEffect(() => {
+    setLiveLogs([]);
+  }, [decodedContainerName]);
 
   // 2. Poll DB logs for this container
   const { data: logs, isLoading, isFetching, error, refetch } = useGetLogsQuery(
@@ -97,60 +114,142 @@ export default function ContainerLogsPage() {
   });
 
   useEffect(() => {
-    let wsUrl = "";
-    const envApiUrl = import.meta.env.VITE_API_BASE_URL;
-    if (envApiUrl) {
-      const urlObj = new URL(envApiUrl, window.location.origin);
-      const wsProtocol = urlObj.protocol === "https:" ? "wss:" : "ws:";
-      wsUrl = `${wsProtocol}//${urlObj.host}/api/ws/logs`;
-    } else {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = window.location.host;
-      wsUrl = `${protocol}//${host}/api/ws/logs`;
-    }
+    let socket: WebSocket | null = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let isComponentMounted = true;
 
-    let socket: WebSocket | null = new WebSocket(wsUrl);
+    const connectWebSocket = () => {
+      let wsUrl = "";
+      const envApiUrl = import.meta.env.VITE_API_BASE_URL;
+      if (envApiUrl && (envApiUrl.startsWith("http://") || envApiUrl.startsWith("https://"))) {
+        try {
+          const urlObj = new URL(envApiUrl);
+          const wsProtocol = urlObj.protocol === "https:" ? "wss:" : "ws:";
+          wsUrl = `${wsProtocol}//${urlObj.host}/api/ws/logs`;
+        } catch {
+          const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+          wsUrl = `${protocol}//${window.location.host}/api/ws/logs`;
+        }
+      } else {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const host = window.location.host;
+        wsUrl = `${protocol}//${host}/api/ws/logs`;
+      }
 
-    socket.onopen = () => {
-      setWsConnected(true);
-    };
-
-    socket.onmessage = (event) => {
-      if (isPaused) return;
       try {
-        const parsed = JSON.parse(event.data);
+        socket = new WebSocket(wsUrl);
 
-        // Filter websocket logs for this specific container
-        const isForThisContainer =
-          !decodedContainerName ||
-          parsed.container_name === decodedContainerName ||
-          (!parsed.container_name && parsed.application_name === decodedContainerName);
-
-        if (!isForThisContainer) return;
-
-        const newLog: LiveWsLog = {
-          id: Math.random().toString(36).substring(2, 9),
-          timestamp: parsed.timestamp || new Date().toISOString(),
-          level: parsed.level || "INFO",
-          message: parsed.message || "",
-          container_name: parsed.container_name || decodedContainerName,
-          host: parsed.host,
+        socket.onopen = () => {
+          if (isComponentMounted) {
+            setWsConnected(true);
+          }
         };
-        setLiveLogs((prev) => [newLog, ...prev].slice(0, 200));
+
+        socket.onmessage = (event) => {
+          if (!isComponentMounted || isPaused) return;
+          try {
+            const parsed = JSON.parse(event.data);
+            console.log("[WebSocket Received on ContainerLogsPage]:", parsed);
+
+            // Handle WebSocket control/heartbeat messages
+            if (parsed.type === "connected") {
+              setWsConnected(true);
+              return;
+            }
+            if (parsed.type === "ping") {
+              if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send("pong");
+              }
+              return;
+            }
+            if (parsed.type === "pong") {
+              return;
+            }
+
+            // Target identifiers associated with this container detail page
+            const targetNames = [
+              decodedContainerName,
+              currentAppRef.current?.container_name,
+              currentAppRef.current?.name,
+              currentAppRef.current?.resource_uuid,
+            ]
+              .filter(Boolean)
+              .map((n) => n!.trim().toLowerCase());
+
+            const logContainer = (parsed.container_name || "").trim().toLowerCase();
+            const logApp = (parsed.application_name || "").trim().toLowerCase();
+
+            // Token overlap matching for container name variations
+            const targetTokens = targetNames
+              .flatMap((name) => name.split(/[-_.]/))
+              .filter((t) => t.length > 2);
+
+            const logTokens = `${logContainer} ${logApp}`
+              .split(/[-_.\s]/)
+              .filter((t) => t.length > 2);
+
+            const isForThisContainer =
+              !decodedContainerName ||
+              targetNames.length === 0 ||
+              targetNames.some(
+                (target) =>
+                  (logContainer && (logContainer === target || logContainer.includes(target) || target.includes(logContainer))) ||
+                  (logApp && (logApp === target || logApp.includes(target) || target.includes(logApp)))
+              ) ||
+              (targetTokens.length > 0 && targetTokens.some((token) => logTokens.includes(token)));
+
+            if (!isForThisContainer) return;
+
+            const newLog: LiveWsLog = {
+              id: Math.random().toString(36).substring(2, 9),
+              timestamp: parsed.timestamp || new Date().toISOString(),
+              level: parsed.level || "INFO",
+              message: parsed.message || "",
+              container_name: parsed.container_name || decodedContainerName,
+              host: parsed.host,
+            };
+            setLiveLogs((prev) => [newLog, ...prev].slice(0, 200));
+          } catch (err) {
+            console.error("Failed to parse websocket log:", err);
+          }
+        };
+
+        socket.onclose = () => {
+          if (!isComponentMounted) return;
+          setWsConnected(false);
+          // Auto reconnect after 3 seconds
+          reconnectTimeout = setTimeout(() => {
+            if (isComponentMounted) {
+              connectWebSocket();
+            }
+          }, 3000);
+        };
+
+        socket.onerror = () => {
+          if (isComponentMounted) {
+            setWsConnected(false);
+          }
+        };
       } catch (err) {
-        console.error("Failed to parse websocket log:", err);
+        console.error("WebSocket connection error:", err);
+        if (isComponentMounted) {
+          setWsConnected(false);
+          reconnectTimeout = setTimeout(() => {
+            if (isComponentMounted) {
+              connectWebSocket();
+            }
+          }, 5000);
+        }
       }
     };
 
-    socket.onclose = () => {
-      setWsConnected(false);
-    };
-
-    socket.onerror = () => {
-      setWsConnected(false);
-    };
+    connectWebSocket();
 
     return () => {
+      isComponentMounted = false;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
       if (socket) {
         socket.close();
       }

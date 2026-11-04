@@ -76,42 +76,99 @@ export default function ContainersPage() {
   }>>({});
 
   useEffect(() => {
-    let wsUrl = "";
-    const envApiUrl = import.meta.env.VITE_API_BASE_URL;
-    if (envApiUrl) {
-      const urlObj = new URL(envApiUrl, window.location.origin);
-      const wsProtocol = urlObj.protocol === "https:" ? "wss:" : "ws:";
-      wsUrl = `${wsProtocol}//${urlObj.host}/api/ws/logs`;
-    } else {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = window.location.host;
-      wsUrl = `${protocol}//${host}/api/ws/logs`;
-    }
+    let socket: WebSocket | null = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let isComponentMounted = true;
 
-    let socket: WebSocket | null = new WebSocket(wsUrl);
+    const connectWebSocket = () => {
+      let wsUrl = "";
+      const envApiUrl = import.meta.env.VITE_API_BASE_URL;
+      if (envApiUrl && (envApiUrl.startsWith("http://") || envApiUrl.startsWith("https://"))) {
+        try {
+          const urlObj = new URL(envApiUrl);
+          const wsProtocol = urlObj.protocol === "https:" ? "wss:" : "ws:";
+          wsUrl = `${wsProtocol}//${urlObj.host}/api/ws/logs`;
+        } catch {
+          const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+          wsUrl = `${protocol}//${window.location.host}/api/ws/logs`;
+        }
+      } else {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const host = window.location.host;
+        wsUrl = `${protocol}//${host}/api/ws/logs`;
+      }
 
-    socket.onopen = () => {
-      setWsConnected(true);
-    };
-
-    socket.onmessage = (event) => {
       try {
-        const parsed = JSON.parse(event.data);
-        setWsLogs((prev) => [parsed, ...prev].slice(0, 500));
+        socket = new WebSocket(wsUrl);
+
+        socket.onopen = () => {
+          if (isComponentMounted) {
+            setWsConnected(true);
+          }
+        };
+
+        socket.onmessage = (event) => {
+          if (!isComponentMounted) return;
+          try {
+            const parsed = JSON.parse(event.data);
+            console.log("[WebSocket Received on ContainersPage]:", parsed);
+
+            // Filter out control and heartbeat messages from log stream state
+            if (parsed.type === "connected") {
+              setWsConnected(true);
+              return;
+            }
+            if (parsed.type === "ping") {
+              if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send("pong");
+              }
+              return;
+            }
+            if (parsed.type === "pong") {
+              return;
+            }
+
+            setWsLogs((prev) => [parsed, ...prev].slice(0, 500));
+          } catch (err) {
+            console.error("Failed to parse websocket log on Containers page:", err);
+          }
+        };
+
+        socket.onclose = () => {
+          if (!isComponentMounted) return;
+          setWsConnected(false);
+          reconnectTimeout = setTimeout(() => {
+            if (isComponentMounted) {
+              connectWebSocket();
+            }
+          }, 3000);
+        };
+
+        socket.onerror = () => {
+          if (isComponentMounted) {
+            setWsConnected(false);
+          }
+        };
       } catch (err) {
-        console.error("Failed to parse websocket log on Containers page:", err);
+        console.error("WebSocket connection error on Containers page:", err);
+        if (isComponentMounted) {
+          setWsConnected(false);
+          reconnectTimeout = setTimeout(() => {
+            if (isComponentMounted) {
+              connectWebSocket();
+            }
+          }, 5000);
+        }
       }
     };
 
-    socket.onclose = () => {
-      setWsConnected(false);
-    };
-
-    socket.onerror = () => {
-      setWsConnected(false);
-    };
+    connectWebSocket();
 
     return () => {
+      isComponentMounted = false;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
       if (socket) {
         socket.close();
       }
@@ -194,10 +251,17 @@ export default function ContainersPage() {
 
       const stats = { ...dbStats };
 
-      const appWsLogs = wsLogs.filter(
-        (wsLog) =>
-          (wsLog.container_name || wsLog.application_name || "app-service") === containerName
-      );
+      const appWsLogs = wsLogs.filter((wsLog) => {
+        const logC = (wsLog.container_name || "").trim().toLowerCase();
+        const logA = (wsLog.application_name || "").trim().toLowerCase();
+        const targetC = (containerName || "").trim().toLowerCase();
+        const targetA = (appName || "").trim().toLowerCase();
+
+        return (
+          (targetC && (logC === targetC || logC.includes(targetC) || targetC.includes(logC))) ||
+          (targetA && (logA === targetA || logA.includes(targetA) || targetA.includes(logA)))
+        );
+      });
 
       appWsLogs.forEach((wsLog) => {
         stats.totalLogs += 1;

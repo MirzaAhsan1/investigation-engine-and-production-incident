@@ -6,7 +6,7 @@ export interface InvestigationAction {
   target: string;
   priority: number;
   confidence: number;
-  status: "PENDING" | "APPROVED" | "REJECTED" | "PENDING_EXECUTION" | "EXECUTED" | "FAILED" | string;
+  status: "PENDING" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "PENDING_EXECUTION" | "EXECUTED" | "FAILED" | string;
   provider: string;
   approved_by?: string | null;
   execution_log?: string | null;

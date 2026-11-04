@@ -14,35 +14,14 @@ def create_test_evidence():
     """
 
     evidence = Evidence(
+        log_count=150,
+        error_count=15,
+        warning_count=35,
+        error_rate=10.0,
+        database_timeout_count=5,
         cpu_usage=45.0,
         memory_usage=62.0,
         disk_usage=55.0,
-        disk_io_wait=8.0,
-
-        api_latency=180.0,
-
-        http_5xx_count=25,
-        http_4xx_count=12,
-
-        request_per_second=120.0,
-
-        error_rate=18.0,
-
-        db_connections=195.0,
-
-        failed_login_attempts=2,
-
-        packet_loss=0.2,
-
-        network_latency=35.0,
-
-        restart_count=0,
-
-        active_containers=8,
-
-        deployment_changed=False,
-
-        ssl_certificate_days_left=90,
     )
 
     return evidence

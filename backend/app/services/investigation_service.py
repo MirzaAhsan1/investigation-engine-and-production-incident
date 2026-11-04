@@ -102,9 +102,7 @@ def create_investigation(
     # 4. ML Prediction
     # ========================================================
 
-    prediction = predict_incident(
-        evidence,
-    )
+    prediction = predict_incident(db=db, incident_id=incident.id)
 
     if not prediction:
         return None
